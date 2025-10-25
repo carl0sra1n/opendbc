@@ -8,6 +8,7 @@ from typing import Any
 from collections.abc import Callable
 from functools import cache
 
+from cereal import custom
 from opendbc.car import DT_CTRL, apply_hysteresis, gen_empty_fingerprint, scale_rot_inertia, scale_tire_stiffness, STD_CARGO_KG
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanData, CanRecvCallable, CanSendCallable
@@ -242,10 +243,10 @@ class CarInterfaceBase(ABC, CarInterfaceBaseSP):
     ret.minEnableSpeed = -1. # enable is done by stock ACC, so ignore this
     ret.steerRatioRear = 0.  # no rear steering, at least on the listed cars aboveA
     ret.openpilotLongitudinalControl = False
-    ret.stopAccel = -2.0
-    ret.stoppingDecelRate = 0.8 # brake_travel/s while trying to stop
-    ret.vEgoStopping = 0.5
-    ret.vEgoStarting = 0.5
+    ret.stopAccel = -4.0
+    ret.stoppingDecelRate = 0.05 # brake_travel/s while trying to stop
+    ret.vEgoStopping = 0.15
+    ret.vEgoStarting = 0.15
     ret.longitudinalTuning.kf = 1.
     ret.longitudinalTuning.kpBP = [0.]
     ret.longitudinalTuning.kpV = [0.]
@@ -262,7 +263,7 @@ class CarInterfaceBase(ABC, CarInterfaceBaseSP):
 
     tune.init('torque')
     tune.torque.kf = 1.0
-    tune.torque.kp = 1.0
+    tune.torque.kp = 0.5
     tune.torque.ki = 0.3
     tune.torque.friction = params['FRICTION']
     tune.torque.latAccelFactor = params['LAT_ACCEL_FACTOR']

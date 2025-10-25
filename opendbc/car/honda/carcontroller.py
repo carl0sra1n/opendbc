@@ -91,6 +91,14 @@ def process_hud_alert(hud_alert):
 
   return alert_fcw, alert_steer_required
 
+def rate_limit_steer(new_steer, last_steer, speed):
+  # Time constant parameters
+  # Adjust alpha dynamically based on speed if desired
+  base_tau = 0.2  # Time constant in seconds
+  alpha = DT_CTRL / (base_tau + DT_CTRL)  # Alpha for first-order low-pass
+
+  # Simple low-pass filter
+  return alpha * new_steer + (1 - alpha) * last_steer
 
 class CarController(CarControllerBase, MadsCarController, GasInterceptorCarController, IntelligentCruiseButtonManagementInterface):
   def __init__(self, dbc_names, CP, CP_SP):
@@ -119,8 +127,14 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     MadsCarController.update(self, self.CP, CC, CC_SP)
     actuators = CC.actuators
     hud_control = CC.hudControl
-    hud_v_cruise = hud_control.setSpeed / CS.v_cruise_factor if hud_control.speedVisible else 255
+    stopping_hud = actuators.longControlState == LongCtrlState.stopping
+    hud_v_cruise = 255
     pcm_cancel_cmd = CC.cruiseControl.cancel
+
+    # 0-251 = (Actual Speed Values)
+    # 252 = Stopped
+    # 253 = --
+    # 255 = (Blank)
 
     if CC.longActive:
       accel = actuators.accel
@@ -162,7 +176,7 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     can_sends.append(hondacan.create_steering_control(self.packer, self.CAN, apply_torque, CC.latActive))
 
     # wind brake from air resistance decel at high speed
-    wind_brake = np.interp(CS.out.vEgo, [0.0, 2.3, 35.0], [0.001, 0.002, 0.15])
+    wind_brake = np.interp(CS.out.vEgo, [0.0, 2.3, 17.8816, 29.0576], [0.001, 0.002, 0.003, 0.67056])
     # all of this is only relevant for HONDA NIDEC
     max_accel = np.interp(CS.out.vEgo, self.params.NIDEC_MAX_ACCEL_BP, self.params.NIDEC_MAX_ACCEL_V)
     # TODO this 1.44 is just to maintain previous behavior

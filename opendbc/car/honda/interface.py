@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import numpy as np
-from opendbc.car import get_safety_config, structs, uds
+from opendbc.car import create_button_events, get_safety_config, get_friction, structs, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.honda.hondacan import CanBus
@@ -9,7 +9,7 @@ from opendbc.car.honda.values import CarControllerParams, HondaFlags, CAR, HONDA
 from opendbc.car.honda.carcontroller import CarController
 from opendbc.car.honda.carstate import CarState
 from opendbc.car.honda.radar_interface import RadarInterface
-from opendbc.car.interfaces import CarInterfaceBase
+from opendbc.car.interfaces import CarInterfaceBase, TorqueFromLateralAccelCallbackType, FRICTION_THRESHOLD, LatControlInputs
 
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP, HondaSafetyFlagsSP
 
@@ -31,6 +31,27 @@ class CarInterface(CarInterfaceBase):
       ACCEL_MAX_VALS = [CarControllerParams.NIDEC_ACCEL_MAX, 0.2]
       ACCEL_MAX_BP = [cruise_speed - 2., cruise_speed - .2]
       return CarControllerParams.NIDEC_ACCEL_MIN, np.interp(current_speed, ACCEL_MAX_BP, ACCEL_MAX_VALS)
+
+  def torque_from_lateral_accel_modded(self, latcontrol_inputs: LatControlInputs, torque_params: car.CarParams.LateralTorqueTuning, lateral_accel_error: float, lateral_accel_deadzone: float, friction_compensation: bool, gravity_adjusted: bool) -> float:
+    threshold = 0.8
+    threshold_lat_accel = 1/torque_params.latAccelFactor * threshold
+    mod_factor = 2.0 # Lateral Accel
+    # The default is a linear relationship between torque and lateral acceleration (accounting for road roll and steering friction)
+    friction = get_friction(lateral_accel_error, lateral_accel_deadzone, FRICTION_THRESHOLD, torque_params, friction_compensation)
+    if abs(latcontrol_inputs.lateral_acceleration) > threshold_lat_accel:
+      modded_lat_accel_factor = float(torque_params.latAccelFactor) * mod_factor
+      excess_lat_accel = abs(latcontrol_inputs.lateral_acceleration) - threshold_lat_accel
+      torque = float(np.sign(latcontrol_inputs.lateral_acceleration)) * threshold_lat_accel / float(torque_params.latAccelFactor)
+      torque += float(np.sign(latcontrol_inputs.lateral_acceleration)) * excess_lat_accel / modded_lat_accel_factor
+    else:
+      torque = latcontrol_inputs.lateral_acceleration / float(torque_params.latAccelFactor)
+    return torque + friction
+
+  def torque_from_lateral_accel(self) -> TorqueFromLateralAccelCallbackType:
+    if not self.CP.enableGasInterceptorDEPRECATED:
+      return self.torque_from_lateral_accel_modded
+    else:
+      return self.torque_from_lateral_accel_linear
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
@@ -89,17 +110,59 @@ class CarInterface(CarInterfaceBase):
         ret.stopAccel = CarControllerParams.BOSCH_ACCEL_MIN  # stock uses -4.0 m/s^2 once stopped but limited by safety model
     else:
       # default longitudinal tuning for all hondas
-      ret.longitudinalTuning.kiBP = [0., 5., 35.]
-      ret.longitudinalTuning.kiV = [1.2, 0.8, 0.5]
+      #tune.kiBP = [0.,  5.,   12.,  20.,  27.,  36.,  40.]
+      #tune.kiV = [0.34, 0.234, 0.20, 0.17, 0.105, 0.09, 0.08]
+      # toyota values noted above
+      # ret.longitudinalTuning.kiBP = [0., 5., 35.]
+      # ret.longitudinalTuning.kiV = [1.2, 0.8, 0.5]
+      # honda values noted above
+      ret.longitudinalTuning.kiBP = [0.,  5.,   12.,  20.,  27.,  36.]
+      ret.longitudinalTuning.kiV = [0.4, 0.6, 0.8, 1.6, 1.8, 2.0]
 
-    # Disable control if EPS mod detected
+    eps_modified = False
     for fw in car_fw:
       if fw.ecu == "eps" and b"," in fw.fwVersion:
-        ret.dashcamOnly = True
+        eps_modified = True
 
     if candidate == CAR.HONDA_CIVIC:
-      ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 2560], [0, 2560]]
-      ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[1.1], [0.33]]
+      if eps_modified:
+      # Best practices for tuning modified Civic EPS firmware (written by Brett Pakkala aka Aragon).
+      # As a general rule of thumb, beyond 2X~, larger values change the ramp-up and ramp-down rate, but not the maximum torque.
+      # Therefore, if one is going above 2X~, it's best to start with 2X tuning values anyway and work your way down in increments of 10% until things feel smooth, if needed.
+      #
+      # The TorqueBP and TorqueV params work as follows: TorqueBP is the actual torque value listed in your EPS firmware file.
+      # However, when sending a value to the car, the car only accepts values from 0 to 3840 — 0% being 0 and 100% being 3840. This is TorqueV.
+      # We can mold these values to spread out the torque applied so that Openpilot understands that the relationship is not linear.
+      #
+      # Proportional (P), Integral (I), and Feed-forward (F) TUNING TIPS:
+      # When tuning, the kp, ki, and kf should be changed at the same rate. For example, if you lower one value by 10%, lower all three by 10%.
+      # If you alter TorqueBP in a certain way, ki/kp/kf should be altered in the opposite way. For example, if you divide TorqueBP by 2, multiply kp/ki/kf by 2.
+      # Sometimes kf (feed-forward) can cause issues such as mild sway. It can be beneficial to try lowering this value separately from the rest, or setting it to 0 if nothing else works.
+      #
+      # Torque Controller TUNING TIPS:
+      # The torque controller uses basic PIF params alongside the lateral acceleration factor and friction params.
+      # Those PIF params can be found here: selfdrive/car/interfaces.py (line 267).
+      # Lateral acceleration and friction params default to the ones found here: selfdrive/car/torque_data/params.toml
+      # Since the torque controller expects a linear response, an additional function was created above in this file (line 39) to adjust the lateral acceleration factor once a certain threshold is crossed.
+      # This makes it more in line with what a typical non-linear EPS firmware mod provides.
+      # If manually tuning the lateral acceleration factor, note that lowering it will make Openpilot think you have less overall torque — thus turning earlier. Raising it will have the opposite effect.
+      # Friction is a form of error correction. For very precise steering, turn friction very high — but this may cause many micro-corrections. For smoother response, lower friction. Adjust to your liking.
+      #
+      # LOW-PASS FILTER TUNING TIPS:
+      # The low-pass filter located in selfdrive/car/honda/carcontroller.py (line 105) might create a delayed response depending on the other tuning params.
+      # Feel free to revert it back to the stock version (listed below):
+      # def rate_limit_steer(new_steer, last_steer):
+      #   MAX_DELTA = 3 * DT_CTRL
+      #   return clip(new_steer, last_steer - MAX_DELTA, last_steer + MAX_DELTA)
+        ret.lateralParams.torqueBP = [0, 2560, 32767] # Max 16-bit torque.
+        ret.lateralParams.torqueV = [0, 2560, 3840] # Value that gets sent to the EPS.
+        ret.lateralTuning.pid.kf = 0.00003  # Modified feed-forward.
+        ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.15], [0.05]] # Corresponding tuning
+      else:
+        ret.lateralTuning.pid.kf = 0.00006  # conservative feed-forward
+        ret.lateralParams.torqueBP = [0x0, 0x917, 0xDC5, 0x1017, 0x119F, 0x140B, 0x1680, 0x6540, 0x8700]
+        ret.lateralParams.torqueV = [0x0, 0x200, 0x300, 0x478, 0x5EC, 0x800, 0xA00, 0xE00, 0xF00]
+        ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.3], [0.1]] # force modded values always on this fork
 
     elif candidate in (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CIVIC_BOSCH_DIESEL):
       ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 4096], [0, 4096]]  # TODO: determine if there is a dead zone at the top end
@@ -278,7 +341,7 @@ class CarInterface(CarInterfaceBase):
           if fw.ecu == "eps" and b"-" not in fw.fwVersion and b"," in fw.fwVersion:
             stock_cp.lateralTuning.pid.kf = 0.00004
             stock_cp.lateralParams.torqueBP, stock_cp.lateralParams.torqueV = [[0, 5760, 15360], [0, 2560, 3840]]
-            stock_cp.lateralTuning.pid.kpV, stock_cp.lateralTuning.pid.kiV = [[0.1575], [0.05175]]
+            stock_cp.lateralTuning.pid.kpV, stock_cp.lateralTuning.pid.kiV = [[0.00525], [0.01725]]
           elif fw.ecu == "eps" and b"-" in fw.fwVersion and b"," in fw.fwVersion:
             stock_cp.lateralParams.torqueBP, stock_cp.lateralParams.torqueV = [[0, 5760, 10240], [0, 2560, 3840]]
             stock_cp.lateralTuning.pid.kpV, stock_cp.lateralTuning.pid.kiV = [[0.3], [0.1]]
