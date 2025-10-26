@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import numpy as np
-from opendbc.car import create_button_events, get_safety_config, get_friction, structs, uds
+from opendbc.car import create_button_events, get_safety_config, structs, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.honda.hondacan import CanBus
@@ -9,7 +10,8 @@ from opendbc.car.honda.values import CarControllerParams, HondaFlags, CAR, HONDA
 from opendbc.car.honda.carcontroller import CarController
 from opendbc.car.honda.carstate import CarState
 from opendbc.car.honda.radar_interface import RadarInterface
-from opendbc.car.interfaces import CarInterfaceBase, TorqueFromLateralAccelCallbackType, FRICTION_THRESHOLD, LatControlInputs
+from opendbc.car.interfaces import CarInterfaceBase, TorqueFromLateralAccelCallbackType
+from opendbc.car.lateral import FRICTION_THRESHOLD, get_friction
 
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP, HondaSafetyFlagsSP
 
