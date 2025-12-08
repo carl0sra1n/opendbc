@@ -228,9 +228,33 @@ class CarInterface(CarInterfaceBase):
 
     return ret
 
+  def torque_from_lateral_accel_modded(self, latcontrol_inputs: structs.CarControl.Actuators, torque_params: structs.CarParams.LateralTorqueTuning, lateral_jerk: float, lateral_accel_deadzone: float, friction_compensation: bool, gravity_adjusted: bool) -> float:
+    lateral_accel_error = latcontrol_inputs.lateral_acceleration - lateral_accel_deadzone
+    threshold = 0.8
+    threshold_lat_accel = 1/torque_params.latAccelFactor * threshold
+    mod_factor = 2.0 # Lateral Accel
+    # The default is a linear relationship between torque and lateral acceleration (accounting for road roll and steering friction)
+    friction = get_friction(lateral_accel_error, lateral_accel_deadzone, self.FRICTION_THRESHOLD, torque_params, friction_compensation)
+    if abs(latcontrol_inputs.lateral_acceleration) > threshold_lat_accel:
+      modded_lat_accel_factor = float(torque_params.latAccelFactor) * mod_factor
+      excess_lat_accel = abs(latcontrol_inputs.lateral_acceleration) - threshold_lat_accel
+      torque = float(np.sign(latcontrol_inputs.lateral_acceleration)) * threshold_lat_accel / float(torque_params.latAccelFactor)
+      torque += float(np.sign(latcontrol_inputs.lateral_acceleration)) * excess_lat_accel / modded_lat_accel_factor
+    else:
+      torque = latcontrol_inputs.lateral_acceleration / float(torque_params.latAccelFactor)
+    return torque + friction
+
+  def torque_from_lateral_accel(self) -> TorqueFromLateralAccelCallbackType:
+    if not self.CP.enableGasInterceptor:
+      return self.torque_from_lateral_accel_modded
+    else:
+      return self.torque_from_lateral_accel_linear
+
   @staticmethod
   def _get_params_sp(stock_cp: structs.CarParams, ret: structs.CarParamsSP, candidate, fingerprint: dict[int, dict[int, int]],
                      car_fw: list[structs.CarParams.CarFw], alpha_long: bool, is_release_sp: bool, docs: bool) -> structs.CarParamsSP:
+
+    # ... previous code ...
     CAN = CanBus(stock_cp, fingerprint)
 
     for fw in car_fw:
@@ -247,16 +271,11 @@ class CarInterface(CarInterfaceBase):
 
     if candidate == CAR.HONDA_CIVIC:
       if ret.flags & HondaFlagsSP.EPS_MODIFIED:
-        # stock request input values:     0x0000, 0x00DE, 0x014D, 0x01EF, 0x0290, 0x0377, 0x0454, 0x0610, 0x06EE
-        # stock request output values:    0x0000, 0x0917, 0x0DC5, 0x1017, 0x119F, 0x140B, 0x1680, 0x1680, 0x1680
-        # modified request output values: 0x0000, 0x0917, 0x0DC5, 0x1017, 0x119F, 0x140B, 0x1680, 0x2880, 0x3180
-        # stock filter output values:     0x009F, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108
-        # modified filter output values:  0x009F, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108, 0x0400, 0x0480
-        # note: max request allowed is 4096, but request is capped at 3840 in firmware, so modifications result in 2x max
-        stock_cp.lateralTuning.pid.kf = 0.00006
-        stock_cp.lateralParams.torqueBP = [0x0, 0x917, 0xDC5, 0x1017, 0x119F, 0x140B, 0x1680, 0x6540, 0x8700]
-        stock_cp.lateralParams.torqueV = [0x0, 0x200, 0x300, 0x478, 0x5EC, 0x800, 0xA00, 0xE00, 0xF00]
-        stock_cp.lateralTuning.pid.kpV, stock_cp.lateralTuning.pid.kiV = [[0.3], [0.1]]
+        # Best practices for tuning modified Civic EPS firmware (written by Brett Pakkala aka Aragon).
+        stock_cp.lateralParams.torqueBP = [0, 2560, 32767] # Max 16-bit torque.
+        stock_cp.lateralParams.torqueV = [0, 2560, 3840] # Value that gets sent to the EPS.
+        stock_cp.lateralTuning.pid.kf = 0.00003  # Modified feed-forward.
+        stock_cp.lateralTuning.pid.kpV, stock_cp.lateralTuning.pid.kiV = [[0.15], [0.05]] # Corresponding tuning
 
     elif candidate in (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CIVIC_BOSCH_DIESEL):
       if ret.flags & HondaFlagsSP.EPS_MODIFIED:
