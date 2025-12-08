@@ -242,10 +242,10 @@ class CarInterfaceBase(ABC, CarInterfaceBaseSP):
     ret.minEnableSpeed = -1. # enable is done by stock ACC, so ignore this
     ret.steerRatioRear = 0.  # no rear steering, at least on the listed cars aboveA
     ret.openpilotLongitudinalControl = False
-    ret.stopAccel = -2.0
-    ret.stoppingDecelRate = 0.8 # brake_travel/s while trying to stop
-    ret.vEgoStopping = 0.5
-    ret.vEgoStarting = 0.5
+    ret.stopAccel = -4.0
+    ret.stoppingDecelRate = 0.05 # brake_travel/s while trying to stop
+    ret.vEgoStopping = 0.15
+    ret.vEgoStarting = 0.15
     ret.longitudinalTuning.kpBP = [0.]
     ret.longitudinalTuning.kpV = [0.]
     ret.longitudinalTuning.kiBP = [0.]
@@ -263,6 +263,7 @@ class CarInterfaceBase(ABC, CarInterfaceBaseSP):
     tune.torque.friction = params['FRICTION']
     tune.torque.latAccelFactor = params['LAT_ACCEL_FACTOR']
     tune.torque.latAccelOffset = 0.0
+    tune.torque.kp = 0.5
     tune.torque.steeringAngleDeadzoneDeg = steering_angle_deadzone_deg
 
   def update(self, can_packets: list[tuple[int, list[CanData]]]) -> tuple[structs.CarState, structs.CarStateSP]:
