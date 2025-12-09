@@ -60,8 +60,8 @@ def create_brake_command(packer, CAN, apply_brake, pump_on, pcm_override, pcm_ca
     "COMPUTER_BRAKE_REQUEST": brake_rq,
     "SET_ME_1": 1,
     "BRAKE_LIGHTS": brakelights,
-    "CHIME": 0
-    "FCW": 0
+    "CHIME": 0,  # send the chime for stock fcw
+    "FCW": 0,  # TODO: Why are there two bits for fcw?
     "AEB_REQ_1": 0,
     "AEB_REQ_2": 0,
     "AEB_STATUS": 0,

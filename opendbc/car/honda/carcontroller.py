@@ -116,6 +116,10 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.brake = 0.0
     self.last_torque = 0.0
 
+    # Steering smoothing filter (low-pass)
+    self.steer_filter_tau = 0.2  # Time constant for smoothing
+    self.filtered_torque = 0.0
+
   def update(self, CC, CC_SP, CS, now_nanos):
     MadsCarController.update(self, self.CP, CC, CC_SP)
     actuators = CC.actuators
@@ -130,8 +134,12 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
       accel = 0.0
       gas, brake = 0.0, 0.0
 
+    # *** apply low-pass filter for smoother steering ***
+    alpha = DT_CTRL / (self.steer_filter_tau + DT_CTRL)
+    self.filtered_torque = alpha * actuators.torque + (1 - alpha) * self.filtered_torque
+
     # *** rate limit steer ***
-    limited_torque = rate_limit(actuators.torque, self.last_torque, -self.params.STEER_DELTA_DOWN * DT_CTRL,
+    limited_torque = rate_limit(self.filtered_torque, self.last_torque, -self.params.STEER_DELTA_DOWN * DT_CTRL,
                                 self.params.STEER_DELTA_UP * DT_CTRL)
     self.last_torque = limited_torque
 
