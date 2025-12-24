@@ -130,10 +130,8 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kiBP = [0.,  5.,   12.,  20.,  27.,  36.]
       ret.longitudinalTuning.kiV = [0.4, 0.6, 0.8, 1.6, 1.8, 2.0]
 
-    # Disable control if EPS mod detected
-    for fw in car_fw:
-      if fw.ecu == "eps" and b"," in fw.fwVersion:
-        ret.dashcamOnly = True
+    # Modified EPS is now supported with proper tuning in _get_params_sp
+    # Control is enabled even with modified EPS firmware
 
     if candidate == CAR.HONDA_CIVIC:
       ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 2560], [0, 2560]]
