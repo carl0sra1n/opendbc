@@ -9,7 +9,7 @@ from opendbc.car.honda.values import CarControllerParams, HondaFlags, CAR, HONDA
 from opendbc.car.honda.carcontroller import CarController
 from opendbc.car.honda.carstate import CarState
 from opendbc.car.honda.radar_interface import RadarInterface
-from opendbc.car.interfaces import CarInterfaceBase
+from opendbc.car.interfaces import CarInterfaceBase, TorqueFromLateralAccelCallbackType
 
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP, HondaSafetyFlagsSP
 
@@ -33,6 +33,40 @@ class CarInterface(CarInterfaceBase):
       ACCEL_MAX_VALS = [CarControllerParams.NIDEC_ACCEL_MAX, 0.2]
       ACCEL_MAX_BP = [cruise_speed - 2., cruise_speed - .2]
       return CarControllerParams.NIDEC_ACCEL_MIN, np.interp(current_speed, ACCEL_MAX_BP, ACCEL_MAX_VALS)
+
+  def torque_from_lateral_accel_modded(self, lateral_acceleration: float, torque_params: structs.CarParams.LateralTorqueTuning,
+                                       friction_compensation: bool) -> float:
+    """
+    Non-linear torque response for modified EPS systems.
+    Below 0.8 Nm: linear response
+    Above 0.8 Nm: 2x scaling factor (less aggressive response at high lateral accel)
+    """
+    threshold = 0.8  # Nm of torque
+    threshold_lat_accel = 1 / torque_params.latAccelFactor * threshold
+    mod_factor = 2.0  # Lateral Accel modifier
+
+    # Calculate base torque based on lateral acceleration magnitude
+    if abs(lateral_acceleration) > threshold_lat_accel:
+      modded_lat_accel_factor = float(torque_params.latAccelFactor) * mod_factor
+      excess_lat_accel = abs(lateral_acceleration) - threshold_lat_accel
+      torque = float(np.sign(lateral_acceleration)) * threshold_lat_accel / float(torque_params.latAccelFactor)
+      torque += float(np.sign(lateral_acceleration)) * excess_lat_accel / modded_lat_accel_factor
+    else:
+      torque = lateral_acceleration / float(torque_params.latAccelFactor)
+
+    return torque
+
+  def torque_from_lateral_accel(self) -> TorqueFromLateralAccelCallbackType:
+    """
+    Callback selector for torque calculation method.
+    Uses modded method for non-gas-interceptor vehicles (stock Civic Nidec).
+    Uses linear method for gas interceptor vehicles.
+    """
+    if not self.CP_SP.enableGasInterceptor:
+      return self.torque_from_lateral_accel_modded
+    else:
+      return self.torque_from_lateral_accel_linear
+
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
@@ -91,13 +125,13 @@ class CarInterface(CarInterfaceBase):
         ret.stopAccel = CarControllerParams.BOSCH_ACCEL_MIN  # stock uses -4.0 m/s^2 once stopped but limited by safety model
     else:
       # default longitudinal tuning for all hondas
-      ret.longitudinalTuning.kiBP = [0., 5., 35.]
-      ret.longitudinalTuning.kiV = [1.2, 0.8, 0.5]
+      # Based on Toyota values but adapted for Honda
+      # More breakpoints for finer control across speed range
+      ret.longitudinalTuning.kiBP = [0.,  5.,   12.,  20.,  27.,  36.]
+      ret.longitudinalTuning.kiV = [0.4, 0.6, 0.8, 1.6, 1.8, 2.0]
 
-    # Disable control if EPS mod detected
-    for fw in car_fw:
-      if fw.ecu == "eps" and b"," in fw.fwVersion:
-        ret.dashcamOnly = True
+    # Modified EPS is now supported with proper tuning in _get_params_sp
+    # Control is enabled even with modified EPS firmware
 
     if candidate == CAR.HONDA_CIVIC:
       ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 2560], [0, 2560]]
@@ -240,13 +274,40 @@ class CarInterface(CarInterfaceBase):
 
     if candidate == CAR.HONDA_CIVIC:
       if ret.flags & HondaFlagsSP.EPS_MODIFIED:
-        # stock request input values:     0x0000, 0x00DE, 0x014D, 0x01EF, 0x0290, 0x0377, 0x0454, 0x0610, 0x06EE
-        # stock request output values:    0x0000, 0x0917, 0x0DC5, 0x1017, 0x119F, 0x140B, 0x1680, 0x1680, 0x1680
-        # modified request output values: 0x0000, 0x0917, 0x0DC5, 0x1017, 0x119F, 0x140B, 0x1680, 0x2880, 0x3180
-        # stock filter output values:     0x009F, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108
-        # modified filter output values:  0x009F, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108, 0x0108, 0x0400, 0x0480
-        # note: max request allowed is 4096, but request is capped at 3840 in firmware, so modifications result in 2x max
-        stock_cp.lateralParams.torqueBP, stock_cp.lateralParams.torqueV = [[0, 2560, 8000], [0, 2560, 3840]]
+        # Best practices for tuning modified Civic EPS firmware (written by Brett Pakkala aka Aragon).
+        # As a general rule of thumb, beyond 2X~, larger values change the ramp-up and ramp-down rate, but not the maximum torque.
+        # Therefore, if one is going above 2X~, it's best to start with 2X tuning values anyway and work your way down in increments of 10% until things feel smooth, if needed.
+        #
+        # The TorqueBP and TorqueV params work as follows: TorqueBP is the actual torque value listed in your EPS firmware file.
+        # However, when sending a value to the car, the car only accepts values from 0 to 3840 — 0% being 0 and 100% being 3840. This is TorqueV.
+        # We can mold these values to spread out the torque applied so that Openpilot understands that the relationship is not linear.
+        #
+        # Proportional (P), Integral (I), and Feed-forward (F) TUNING TIPS:
+        # When tuning, the kp, ki, and kf should be changed at the same rate. For example, if you lower one value by 10%, lower all three by 10%.
+        # If you alter TorqueBP in a certain way, ki/kp/kf should be altered in the opposite way. For example, if you divide TorqueBP by 2, multiply kp/ki/kf by 2.
+        # Sometimes kf (feed-forward) can cause issues such as mild sway. It can be beneficial to try lowering this value separately from the rest, or setting it to 0 if nothing else works.
+        #
+        # Torque Controller TUNING TIPS:
+        # The torque controller uses basic PIF params alongside the lateral acceleration factor and friction params.
+        # Those PIF params can be found here: opendbc/car/interfaces.py
+        # Lateral acceleration and friction params default to the ones found here: opendbc/car/torque_data/params.toml
+        # Since the torque controller expects a linear response, an additional function was created (torque_from_lateral_accel_modded) to adjust the lateral acceleration factor once a certain threshold is crossed.
+        # This makes it more in line with what a typical non-linear EPS firmware mod provides.
+        # If manually tuning the lateral acceleration factor, note that lowering it will make Openpilot think you have less overall torque — thus turning earlier. Raising it will have the opposite effect.
+        # Friction is a form of error correction. For very precise steering, turn friction very high — but this may cause many micro-corrections. For smoother response, lower friction. Adjust to your liking.
+        #
+        # LOW-PASS FILTER TUNING TIPS:
+        # The low-pass filter located in opendbc/car/honda/carcontroller.py might create a delayed response depending on the other tuning params.
+        # Feel free to revert it back to the stock version if needed.
+        stock_cp.lateralParams.torqueBP = [0, 2560, 32767]  # Max 16-bit torque
+        stock_cp.lateralParams.torqueV = [0, 2560, 3840]    # Value that gets sent to the EPS
+        stock_cp.lateralTuning.pid.kf = 0.00003             # Modified feed-forward
+        stock_cp.lateralTuning.pid.kpV, stock_cp.lateralTuning.pid.kiV = [[0.12], [0.06]]  # Reduced kP for smoother response
+      else:
+        # Stock EPS - conservative values with more breakpoints
+        stock_cp.lateralTuning.pid.kf = 0.00006  # conservative feed-forward
+        stock_cp.lateralParams.torqueBP = [0x0, 0x917, 0xDC5, 0x1017, 0x119F, 0x140B, 0x1680, 0x6540, 0x8700]
+        stock_cp.lateralParams.torqueV = [0x0, 0x200, 0x300, 0x478, 0x5EC, 0x800, 0xA00, 0xE00, 0xF00]
         stock_cp.lateralTuning.pid.kpV, stock_cp.lateralTuning.pid.kiV = [[0.3], [0.1]]
 
     elif candidate in (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CIVIC_BOSCH_DIESEL):
