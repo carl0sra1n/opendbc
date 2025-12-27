@@ -302,7 +302,7 @@ class CarInterface(CarInterfaceBase):
         stock_cp.lateralParams.torqueBP = [0, 2560, 32767]  # Max 16-bit torque
         stock_cp.lateralParams.torqueV = [0, 2560, 3840]    # Value that gets sent to the EPS
         stock_cp.lateralTuning.pid.kf = 0.00003             # Modified feed-forward
-        stock_cp.lateralTuning.pid.kpV, stock_cp.lateralTuning.pid.kiV = [[0.12], [0.06]]  # Reduced kP for smoother response
+        stock_cp.lateralTuning.pid.kpV, stock_cp.lateralTuning.pid.kiV = [[0.10], [0.05]]  # Further reduced for even smoother response
       else:
         # Stock EPS - conservative values with more breakpoints
         stock_cp.lateralTuning.pid.kf = 0.00006  # conservative feed-forward
