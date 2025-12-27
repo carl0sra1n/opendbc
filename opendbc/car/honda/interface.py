@@ -301,7 +301,7 @@ class CarInterface(CarInterfaceBase):
         # Feel free to revert it back to the stock version if needed.
         stock_cp.lateralParams.torqueBP = [0, 2560, 32767]  # Max 16-bit torque
         stock_cp.lateralParams.torqueV = [0, 2560, 3840]    # Value that gets sent to the EPS
-        stock_cp.lateralTuning.pid.kf = 0.00003             # Modified feed-forward
+        stock_cp.lateralTuning.pid.kf = 0.0                 # Disabled - prevents oscillations in curves (per Aragon)
         stock_cp.lateralTuning.pid.kpV, stock_cp.lateralTuning.pid.kiV = [[0.10], [0.05]]  # Further reduced for even smoother response
       else:
         # Stock EPS - conservative values with more breakpoints
